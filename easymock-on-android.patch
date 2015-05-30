@@ -1,0 +1,1045 @@
+Index: easymock/src/main/java/org/easymock/internal/DefaultClassInstantiator.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/DefaultClassInstantiator.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/DefaultClassInstantiator.java	(revision )
+@@ -86,7 +86,7 @@
+      *            Class in which constructor is searched
+      * @return Constructor to use
+      */
+-    private Constructor<?> getConstructorToUse(final Class<?> clazz) {
++    public Constructor<?> getConstructorToUse(final Class<?> clazz) {
+         // First try to use the empty constructor
+         try {
+             return clazz.getConstructor(new Class[0]);
+@@ -106,7 +106,7 @@
+      *            Classes to instantiate
+      * @return Instances of methodTypes in order
+      */
+-    private Object[] getArgsForTypes(final Class<?>[] methodTypes) throws InstantiationException {
++    public Object[] getArgsForTypes(final Class<?>[] methodTypes) throws InstantiationException {
+         final Object[] methodArgs = new Object[methodTypes.length];
+ 
+         for (int i = 0; i < methodTypes.length; i++) {
+Index: easymock/src/test/java/org/easymock/tests/MockingTest.java
+===================================================================
+--- easymock/src/test/java/org/easymock/tests/MockingTest.java	(revision 269)
++++ easymock/src/test/java/org/easymock/tests/MockingTest.java	(revision )
+@@ -21,7 +21,6 @@
+ import java.lang.reflect.Method;
+ import java.util.List;
+ 
+-import org.easymock.internal.ClassExtensionHelper;
+ import org.easymock.internal.MocksControl;
+ import org.easymock.internal.MocksControl.MockType;
+ import org.junit.Test;
+@@ -53,8 +52,8 @@
+         final ClassToMock transition2 = createMock(ClassToMock.class);
+ 
+         // Should have two different callbacks
+-        assertNotSame(ClassExtensionHelper.getInterceptor(transition2), ClassExtensionHelper
+-                .getInterceptor(transition1));
++        assertNotSame(MocksControl.getInvocationHandler(transition2),
++                MocksControl.getInvocationHandler(transition1));
+ 
+         transition2.foo();
+         transition1.foo();
+@@ -134,7 +133,7 @@
+     }
+ 
+     private MockType extractBehavior(final Object mock) {
+-        final MocksControl ctrl = ClassExtensionHelper.getControl(mock);
++        final MocksControl ctrl = MocksControl.getControl(mock);
+         return ctrl.getType();
+     }
+ 
+Index: easymock/src/main/java/org/easymock/internal/AndroidClassProxyFactory.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/AndroidClassProxyFactory.java	(revision )
++++ easymock/src/main/java/org/easymock/internal/AndroidClassProxyFactory.java	(revision )
+@@ -0,0 +1,98 @@
++/**
++ * Copyright 2012 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.easymock.internal;
++
++import com.google.dexmaker.stock.ProxyBuilder;
++import java.io.IOException;
++import java.lang.reflect.Constructor;
++import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import java.lang.reflect.Modifier;
++import java.util.Arrays;
++import java.util.HashSet;
++import java.util.Set;
++import org.easymock.ConstructorArgs;
++
++/**
++ * Mocks concrete classes for Android's runtime by generating dex files.
++ */
++public final class AndroidClassProxyFactory implements IProxyFactory {
++    public <T> T createProxy(Class<T> toMock, InvocationHandler handler,
++            Method[] mockedMethods, ConstructorArgs constructorArgs) {
++        final MockHandler interceptor = new MockHandler(handler, mockedMethods);
++        try {
++            ProxyBuilder<T> builder = ProxyBuilder.forClass(toMock)
++                    .handler(interceptor);
++            if (constructorArgs != null) {
++                builder.constructorArgTypes(constructorArgs.getConstructor().getParameterTypes())
++                        .constructorArgValues(constructorArgs.getInitArgs());
++            } else {
++                try {
++                    DefaultClassInstantiator instantiator = new DefaultClassInstantiator();
++                    Constructor<?> constructor = instantiator.getConstructorToUse(toMock);
++                    Object[] params = instantiator.getArgsForTypes(constructor.getParameterTypes());
++                    builder.constructorArgTypes(constructor.getParameterTypes())
++                            .constructorArgValues(params);
++                } catch (InstantiationException e) {
++                    throw new RuntimeException("Fail to instantiate mock for " + toMock);
++                }
++            }
++            return builder.build();
++        } catch (IOException e) {
++            throw new RuntimeException("Failed to mock " + toMock, e);
++        }
++    }
++
++    public InvocationHandler getInvocationHandler(Object mock) {
++        MockHandler mockHandler = (MockHandler) ProxyBuilder.getInvocationHandler(mock);
++        return mockHandler.delegate;
++    }
++
++    private static class MockHandler implements InvocationHandler {
++        private final InvocationHandler delegate;
++        private final Set<Method> mockedMethods;
++
++        public MockHandler(InvocationHandler delegate, Method... mockedMethods) {
++            this.delegate = delegate;
++            this.mockedMethods = (mockedMethods != null)
++                    ? new HashSet<Method>(Arrays.asList(mockedMethods))
++                    : null;
++        }
++
++        public Object invoke(Object obj, Method method, Object[] args) throws Throwable {
++            if (method.isBridge()) {
++                method = BridgeMethodResolver.findBridgedMethod(method);
++            }
++
++            // Never intercept EasyMock's own calls to fillInStackTrace
++            boolean internalFillInStackTraceCall = obj instanceof Throwable
++                    && method.getName().equals("fillInStackTrace")
++                    && ClassProxyFactory.isCallerMockInvocationHandlerInvoke(new Throwable());
++
++            if (internalFillInStackTraceCall
++                    || isMocked(method) && !Modifier.isAbstract(method.getModifiers())) {
++                return ProxyBuilder.callSuper(obj, method, args);
++            }
++
++            return delegate.invoke(obj, method, args);
++        }
++
++        private boolean isMocked(Method method) {
++            return mockedMethods != null && !mockedMethods.contains(method);
++        }
++    }
++}
+Index: easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassExtensionHelperTest.java
+===================================================================
+--- easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassExtensionHelperTest.java	(revision 269)
++++ easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassExtensionHelperTest.java	(revision )
+@@ -15,7 +15,7 @@
+  */
+ package org.easymock.classextension.tests2;
+ 
+-import static org.easymock.internal.ClassExtensionHelper.*;
++import static org.easymock.internal.MocksControl.*;
+ import static org.junit.Assert.*;
+ 
+ import java.lang.reflect.Proxy;
+Index: easymock/src/test/java/org/easymock/tests2/ReflectionUtilsTest.java
+===================================================================
+--- easymock/src/test/java/org/easymock/tests2/ReflectionUtilsTest.java	(revision 269)
++++ easymock/src/test/java/org/easymock/tests2/ReflectionUtilsTest.java	(revision )
+@@ -67,7 +67,9 @@
+     @Test
+     public void testFindMethod() {
+         final Method m = ReflectionUtils.findMethod(String.class, "length");
+-        assertEquals("public int java.lang.String.length()", m.toString());
++        assertEquals(String.class, m.getDeclaringClass());
++        assertEquals("length", m.getName());
++        assertEquals(int.class, m.getReturnType());
+     }
+ 
+     @Test
+Index: easymock-integration/src/test/java/org/easymock/itests/OsgiClassExtensionTest.java
+===================================================================
+--- easymock-integration/src/test/java/org/easymock/itests/OsgiClassExtensionTest.java	(revision 269)
++++ easymock-integration/src/test/java/org/easymock/itests/OsgiClassExtensionTest.java	(revision )
+@@ -20,7 +20,7 @@
+ import java.util.ArrayList;
+ import java.util.jar.Manifest;
+ 
+-import org.easymock.internal.ClassExtensionHelper;
++import org.easymock.internal.MocksControl;
+ import org.objenesis.Objenesis;
+ import org.osgi.framework.Bundle;
+ import org.osgi.framework.Constants;
+@@ -28,7 +28,7 @@
+ 
+ /**
+  * Note: This is a JUnit 3 test because of the Spring OSGi test framework
+- * 
++ *
+  * @author Henri Tremblay
+  */
+ public class OsgiClassExtensionTest extends OsgiBaseTest {
+@@ -114,7 +114,7 @@
+ 
+     public void testCanUseInternal() {
+         final ArrayList<?> mock = createMock(ArrayList.class);
+-        ClassExtensionHelper.getControl(mock);
++        MocksControl.getControl(mock);
+     }
+ 
+ }
+Index: easymock/src/test/java/org/easymock/tests2/PartialMockingTest.java
+===================================================================
+--- easymock/src/test/java/org/easymock/tests2/PartialMockingTest.java	(revision 269)
++++ easymock/src/test/java/org/easymock/tests2/PartialMockingTest.java	(revision )
+@@ -88,12 +88,6 @@
+     public void testPartialMock_ExceptionInConstructor() throws Exception {
+         final Constructor<?> cstr = ArrayList.class.getConstructor(Integer.TYPE);
+         final ConstructorArgs constructorArgs = new ConstructorArgs(cstr, -5);
+-        try {
+-            createMockBuilder(ArrayList.class).withConstructor(-5).createMock();
++        createMockBuilder(ArrayList.class).withConstructor(-5).createMock();
+-        } catch (final RuntimeException e) {
+-            assertEquals("Failed to instantiate mock calling constructor: Exception in constructor", e
+-                    .getMessage());
+-            throw e;
+-        }
+-    }
++    }
++}
+-}
+Index: easymock/src/main/java/org/easymock/internal/MocksControl.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/MocksControl.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/MocksControl.java	(revision )
+@@ -15,10 +15,10 @@
+  */
+ package org.easymock.internal;
+ 
+-import static org.easymock.internal.ClassExtensionHelper.*;
+-
+ import java.io.Serializable;
++import java.lang.reflect.InvocationHandler;
+ import java.lang.reflect.Method;
++import java.lang.reflect.Proxy;
+ 
+ import org.easymock.*;
+ 
+@@ -29,6 +29,10 @@
+ 
+     private static final long serialVersionUID = 443604921336702014L;
+ 
++    /** lazily created; the proxy factory for classes */
++    private static IProxyFactory classProxyFactory;
++    private static final IProxyFactory interfaceProxyFactory = new JavaProxyFactory();
++
+     private IMocksControlState state;
+ 
+     private IMocksBehavior behavior;
+@@ -53,95 +57,109 @@
+     }
+ 
+     public <T> T createMock(final Class<T> toMock) {
+-        try {
+-            state.assertRecordState();
+-            final IProxyFactory<T> proxyFactory = createProxyFactory(toMock);
+-            return proxyFactory.createProxy(toMock, new ObjectMethodsFilter(toMock,
+-                    new MockInvocationHandler(this), null));
+-        } catch (final RuntimeExceptionWrapper e) {
+-            throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
++        return createMock(null, toMock, (Method[]) null);
+-        }
++    }
+-    }
+ 
+     public <T> T createMock(final String name, final Class<T> toMock) {
+-        try {
+-            state.assertRecordState();
+-            final IProxyFactory<T> proxyFactory = createProxyFactory(toMock);
+-            return proxyFactory.createProxy(toMock, new ObjectMethodsFilter(toMock,
+-                    new MockInvocationHandler(this), name));
+-        } catch (final RuntimeExceptionWrapper e) {
+-            throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
++        return createMock(name, toMock, (Method[]) null);
+-        }
++    }
+-    }
+ 
+     public <T> T createMock(final String name, final Class<T> toMock, final Method... mockedMethods) {
+-
+-        if (toMock.isInterface()) {
+-            throw new IllegalArgumentException("Partial mocking doesn't make sense for interface");
++        return createMock(name, toMock, null, mockedMethods);
+-        }
++    }
+ 
+-        final T mock = createMock(name, toMock);
+-
+-        // Set the mocked methods on the interceptor
+-        getInterceptor(mock).setMockedMethods(mockedMethods);
+-
+-        return mock;
+-    }
+-
+     public <T> T createMock(final Class<T> toMock, final Method... mockedMethods) {
+-
+-        if (toMock.isInterface()) {
+-            throw new IllegalArgumentException("Partial mocking doesn't make sense for interface");
++        return createMock(null, toMock, null, mockedMethods);
+-        }
++    }
+ 
+-        final T mock = createMock(toMock);
+-
+-        // Set the mocked methods on the interceptor
+-        getInterceptor(mock).setMockedMethods(mockedMethods);
+-
+-        return mock;
+-    }
+-
+     public <T> T createMock(final Class<T> toMock, final ConstructorArgs constructorArgs,
+             final Method... mockedMethods) {
+-        // Trick to allow the ClassProxyFactory to access constructor args
+-        setCurrentConstructorArgs(constructorArgs);
+-        try {
+-            return createMock(toMock, mockedMethods);
+-        } finally {
+-            setCurrentConstructorArgs(null);
++        return createMock(null, toMock, constructorArgs, mockedMethods);
+-        }
++    }
+-    }
+ 
+     public <T> T createMock(final String name, final Class<T> toMock, final ConstructorArgs constructorArgs,
+             final Method... mockedMethods) {
+-        // Trick to allow the ClassProxyFactory to access constructor args
+-        setCurrentConstructorArgs(constructorArgs);
++        if (toMock.isInterface() && mockedMethods != null) {
++            throw new IllegalArgumentException("Partial mocking doesn't make sense for interface");
++        }
++
+         try {
+-            return createMock(name, toMock, mockedMethods);
+-        } finally {
+-            setCurrentConstructorArgs(null);
++            state.assertRecordState();
++            IProxyFactory proxyFactory = toMock.isInterface()
++                    ? interfaceProxyFactory
++                    : getClassProxyFactory();
++            return proxyFactory.createProxy(toMock, new ObjectMethodsFilter(toMock,
++                    new MockInvocationHandler(this), name), mockedMethods, constructorArgs);
++        } catch (final RuntimeExceptionWrapper e) {
++            throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
+         }
+     }
+ 
+-    protected <T> IProxyFactory<T> createProxyFactory(final Class<T> toMock) {
+-        if (toMock.isInterface()) {
+-            return new JavaProxyFactory<T>();
++    public static IProxyFactory getProxyFactory(Object o) {
++        return Proxy.isProxyClass(o.getClass())
++                ? new JavaProxyFactory()
++                : getClassProxyFactory();
+-        }
++    }
++
++    private static IProxyFactory getClassProxyFactory() {
+         final String classMockingDisabled = EasyMockProperties.getInstance().getProperty(
+                 EasyMock.DISABLE_CLASS_MOCKING);
+         if (Boolean.valueOf(classMockingDisabled)) {
+             throw new IllegalArgumentException("Class mocking is currently disabled. Change "
+                     + EasyMock.DISABLE_CLASS_MOCKING + " to true do modify this behavior");
+         }
++
++        IProxyFactory cached = classProxyFactory;
++        if (cached != null) {
++            return cached;
++        }
++
++        if (AndroidSupport.isAndroid()) {
++            return classProxyFactory = new AndroidClassProxyFactory();
++        }
++
+         try {
+-            return new ClassProxyFactory<T>();
++            return classProxyFactory = new ClassProxyFactory();
+         } catch (final NoClassDefFoundError e) {
+             throw new RuntimeException(
+                     "Class mocking requires to have cglib and objenesis librairies in the classpath", e);
+         }
+     }
+ 
++    public static MocksControl getControl(final Object mock) {
++        try {
++            IProxyFactory factory = getProxyFactory(mock);
++            ObjectMethodsFilter handler = (ObjectMethodsFilter) factory.getInvocationHandler(mock);
++            return handler.getDelegate().getControl();
++        } catch (final ClassCastException e) {
++            throw new IllegalArgumentException("Not a mock: " + mock.getClass().getName());
++        }
++    }
++
++    public static InvocationHandler getInvocationHandler(final Object mock) {
++        return getClassProxyFactory().getInvocationHandler(mock);
++    }
++
++    /**
++     * Return the class of interface (depending on the mock type) that was
++     * mocked
++     *
++     * @param <T>
++     *            Mocked class
++     * @param <V>
++     *            Mock class
++     * @param proxy
++     *            Mock object
++     * @return the mocked class or interface
++     */
++    @SuppressWarnings("unchecked")
++    public static <T, V extends T> Class<T> getMockedType(final V proxy) {
++        if (Proxy.isProxyClass(proxy.getClass())) {
++            return (Class<T>) proxy.getClass().getInterfaces()[0];
++        }
++        return (Class<T>) proxy.getClass().getSuperclass();
++    }
++
+     public final void reset() {
+         behavior = new MocksBehavior(type == MockType.NICE);
+         behavior.checkOrder(type == MockType.STRICT);
+Index: easymock/src/test/java/org/easymock/tests2/MockBuilderTest.java
+===================================================================
+--- easymock/src/test/java/org/easymock/tests2/MockBuilderTest.java	(revision 269)
++++ easymock/src/test/java/org/easymock/tests2/MockBuilderTest.java	(revision )
+@@ -16,6 +16,7 @@
+ package org.easymock.tests2;
+ 
+ import static org.easymock.EasyMock.*;
++import org.easymock.internal.MocksControl;
+ import static org.junit.Assert.*;
+ 
+ import java.lang.reflect.Field;
+@@ -23,7 +24,6 @@
+ 
+ import org.easymock.ConstructorArgs;
+ import org.easymock.IMocksControl;
+-import org.easymock.internal.ClassExtensionHelper;
+ import org.easymock.internal.MockBuilder;
+ import org.junit.Before;
+ import org.junit.Test;
+@@ -149,14 +149,18 @@
+ 
+     @Test
+     public void testWithEmptyConstructor() throws Exception {
+-        mock = builder.withConstructor().createMock();
+-        final Field field = ArrayList.class.getDeclaredField("elementData");
+-        field.setAccessible(true);
+-        final int expected = ((Object[]) field.get(new ArrayList<String>())).length;
+-        final int actual = ((Object[]) field.get(mock)).length;
+-        assertEquals(expected, actual);
++        EmptyConstructor instance = new MockBuilder<EmptyConstructor>(EmptyConstructor.class)
++                .createMock();
++        assertEquals("foo", instance.setByConstructor);
+     }
+-
++    
++    public static class EmptyConstructor {
++        private final String setByConstructor;
++        public EmptyConstructor() {
++            this.setByConstructor = "foo";
++        }
++    }
++
+     @Test
+     public void testWithEmptyConstructor_NoEmptyConstructor() throws Exception {
+         try {
+@@ -233,7 +237,7 @@
+     public void testCreateMockIMocksControl() {
+         final IMocksControl ctrl = createControl();
+         mock = builder.createMock(ctrl);
+-        assertSame(ClassExtensionHelper.getControl(mock), ctrl);
++        assertSame(MocksControl.getControl(mock), ctrl);
+     }
+ 
+     @Test
+@@ -273,7 +277,7 @@
+     public void testCreateMockStringIMocksControl() {
+         final IMocksControl ctrl = createControl();
+         mock = builder.addMockedMethod("toString").createMock("myName", ctrl);
+-        assertSame(ClassExtensionHelper.getControl(mock), ctrl);
++        assertSame(MocksControl.getControl(mock), ctrl);
+         assertTrue(mock.toString().contains("myName"));
+     }
+ 
+Index: easymock/src/main/java/org/easymock/internal/JavaProxyFactory.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/JavaProxyFactory.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/JavaProxyFactory.java	(revision )
+@@ -16,17 +16,21 @@
+ package org.easymock.internal;
+ 
+ import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
+ import java.lang.reflect.Proxy;
++import org.easymock.ConstructorArgs;
+ 
+ /**
+- * @param <T>
+- *            Type of the values compared
+- * 
+  * @author OFFIS, Tammo Freese
+  */
+-public class JavaProxyFactory<T> implements IProxyFactory<T> {
++public class JavaProxyFactory implements IProxyFactory {
+     @SuppressWarnings("unchecked")
+-    public T createProxy(final Class<T> toMock, final InvocationHandler handler) {
++    public <T> T createProxy(Class<T> toMock, InvocationHandler handler,
++            Method[] mockedMethods, ConstructorArgs constructorArgs) {
+         return (T) Proxy.newProxyInstance(toMock.getClassLoader(), new Class[] { toMock }, handler);
+     }
++
++    public InvocationHandler getInvocationHandler(Object mock) {
++        return Proxy.getInvocationHandler(mock);
+-}
++    }
++}
+Index: easymock/src/main/java/org/easymock/internal/IProxyFactory.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/IProxyFactory.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/IProxyFactory.java	(revision )
+@@ -16,13 +16,27 @@
+ package org.easymock.internal;
+ 
+ import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.Method;
++import org.easymock.ConstructorArgs;
+ 
+ /**
+- * @param <T>
+- *            Type of the values compared
+- * 
+  * @author OFFIS, Tammo Freese
+  */
+-public interface IProxyFactory<T> {
+-    T createProxy(Class<T> toMock, InvocationHandler handler);
++public interface IProxyFactory {
++
++    /**
++     * @param mockedMethods the subset of {@code toMock}'s methods to mock, or
++     *     null to mock all methods.
++     * @param constructorArgs the constructor arguments to use, or null to use
++     *     heuristics to choose a constructor.
++     */
++    <T> T createProxy(Class<T> toMock, InvocationHandler handler, Method[] mockedMethods,
++            ConstructorArgs constructorArgs);
++
++    /**
++     * Returns the invocation handler for {@code mock};
++     *
++     * @param mock a mock instance previously returned by {@code createProxy}.
++     */
++    InvocationHandler getInvocationHandler(Object mock);
+ }
+Index: easymock/src/test/java/org/easymock/tests2/ClassExtensionHelperTest.java
+===================================================================
+--- easymock/src/test/java/org/easymock/tests2/ClassExtensionHelperTest.java	(revision 269)
++++ easymock/src/test/java/org/easymock/tests2/ClassExtensionHelperTest.java	(revision )
+@@ -15,21 +15,24 @@
+  */
+ package org.easymock.tests2;
+ 
+-import static org.easymock.EasyMock.*;
+-import static org.easymock.internal.ClassExtensionHelper.*;
+-import static org.junit.Assert.*;
+-
++import com.google.dexmaker.stock.ProxyBuilder;
+ import java.lang.reflect.InvocationHandler;
+ import java.lang.reflect.Method;
+ import java.lang.reflect.Proxy;
+ import java.util.ArrayList;
+ import java.util.List;
+-
+ import net.sf.cglib.proxy.Enhancer;
+ import net.sf.cglib.proxy.NoOp;
+-
+ import org.easymock.EasyMock;
++import static org.easymock.EasyMock.createMock;
++import org.easymock.internal.AndroidSupport;
++import static org.easymock.internal.MocksControl.getControl;
++import static org.easymock.internal.MocksControl.getMockedType;
+ import org.easymock.internal.MocksControl;
++import static org.junit.Assert.assertEquals;
++import static org.junit.Assert.assertNotNull;
++import static org.junit.Assert.assertTrue;
++import static org.junit.Assert.fail;
+ import org.junit.Test;
+ 
+ /**
+@@ -37,6 +40,12 @@
+  */
+ public class ClassExtensionHelperTest {
+ 
++    private static final InvocationHandler NOOP_INVOCATION_HANDLER = new InvocationHandler() {
++        public Object invoke(Object proxy, Method method, Object[] args) {
++            return null;
++        }
++    };
++
+     @Test
+     public void testGetControl_EasyMock() {
+         final List<?> mock = EasyMock.createMock(List.class);
+@@ -50,8 +59,15 @@
+     }
+ 
+     @Test
+-    public void testGetControl_EnhancedButNotAMock() {
+-        final Object o = Enhancer.create(ArrayList.class, NoOp.INSTANCE);
++    public void testGetControl_EnhancedButNotAMock() throws Exception {
++        final Object o;
++        if (AndroidSupport.isAndroid()) {
++            o = ProxyBuilder.forClass(ArrayList.class)
++                    .handler(NOOP_INVOCATION_HANDLER)
++                    .build();
++        } else {
++            o = Enhancer.create(ArrayList.class, NoOp.INSTANCE);
++        }
+         try {
+             getControl(o);
+             fail();
+@@ -82,8 +98,7 @@
+         try {
+             getControl("");
+             fail();
+-        } catch (final IllegalArgumentException e) {
+-            assertEquals("Not a mock: " + String.class.getName(), e.getMessage());
++        } catch (final IllegalArgumentException expected) {
+         }
+     }
+ 
+Index: easymock-classextension/src/test/java/org/easymock/classextension/tests2/MockBuilderTest.java
+===================================================================
+--- easymock-classextension/src/test/java/org/easymock/classextension/tests2/MockBuilderTest.java	(revision 269)
++++ easymock-classextension/src/test/java/org/easymock/classextension/tests2/MockBuilderTest.java	(revision )
+@@ -15,8 +15,8 @@
+  */
+ package org.easymock.classextension.tests2;
+ 
+-import static org.easymock.EasyMock.*;
+ import static org.easymock.classextension.EasyMock.*;
++import org.easymock.internal.MocksControl;
+ import static org.junit.Assert.*;
+ 
+ import java.lang.reflect.Field;
+@@ -25,7 +25,6 @@
+ import org.easymock.classextension.ConstructorArgs;
+ import org.easymock.classextension.IMocksControl;
+ import org.easymock.classextension.internal.MockBuilder;
+-import org.easymock.internal.ClassExtensionHelper;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+@@ -188,7 +187,7 @@
+     public void testCreateMockIMocksControl() {
+         final IMocksControl ctrl = createControl();
+         mock = builder.createMock(ctrl);
+-        assertSame(ClassExtensionHelper.getControl(mock), ctrl);
++        assertSame(MocksControl.getControl(mock), ctrl);
+     }
+ 
+     @Test
+@@ -228,7 +227,7 @@
+     public void testCreateMockStringIMocksControl() {
+         final IMocksControl ctrl = createControl();
+         mock = builder.addMockedMethod("toString").createMock("myName", ctrl);
+-        assertSame(ClassExtensionHelper.getControl(mock), ctrl);
++        assertSame(MocksControl.getControl(mock), ctrl);
+         assertTrue(mock.toString().contains("myName"));
+     }
+ 
+Index: easymock/src/main/java/org/easymock/internal/AndroidSupport.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/AndroidSupport.java	(revision )
++++ easymock/src/main/java/org/easymock/internal/AndroidSupport.java	(revision )
+@@ -0,0 +1,36 @@
++/*
++ * Copyright 2012 the original author or authors.
++ *
++ * Licensed under the Apache License, Version 2.0 (the "License");
++ * you may not use this file except in compliance with the License.
++ * You may obtain a copy of the License at
++ *
++ *     http://www.apache.org/licenses/LICENSE-2.0
++ *
++ * Unless required by applicable law or agreed to in writing, software
++ * distributed under the License is distributed on an "AS IS" BASIS,
++ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
++ * See the License for the specific language governing permissions and
++ * limitations under the License.
++ */
++
++package org.easymock.internal;
++
++/**
++ * Android-specific support.
++ */
++public final class AndroidSupport {
++    private static boolean isAndroid;
++    static {
++        try {
++            Class.forName("dalvik.system.PathClassLoader");
++            isAndroid = true;
++        } catch (ClassNotFoundException e) {
++            isAndroid = false;
++        }
++    }
++
++    public static boolean isAndroid() {
++        return isAndroid;
++    }
++}
+Index: easymock/src/main/java/org/easymock/internal/Invocation.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/Invocation.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/Invocation.java	(revision )
+@@ -152,7 +152,7 @@
+             return mockName + "." + methodName;
+         }
+ 
+-        final Class<?> clazz = ClassExtensionHelper.getMockedType(mock);
++        final Class<?> clazz = MocksControl.getMockedType(mock);
+         return clazz.getSimpleName() + "." + methodName;
+     }
+ 
+Index: easymock/src/main/java/org/easymock/internal/ObjectMethodsFilter.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/ObjectMethodsFilter.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/ObjectMethodsFilter.java	(revision )
+@@ -86,7 +86,7 @@
+     }
+ 
+     private String mockToString(final Object proxy) {
+-        return (name != null) ? name : "EasyMock for " + ClassExtensionHelper.getMockedType(proxy);
++        return (name != null) ? name : "EasyMock for " + MocksControl.getMockedType(proxy);
+     }
+ 
+     public MockInvocationHandler getDelegate() {
+Index: easymock/src/main/java/org/easymock/EasyMock.java
+===================================================================
+--- easymock/src/main/java/org/easymock/EasyMock.java	(revision 269)
++++ easymock/src/main/java/org/easymock/EasyMock.java	(revision )
+@@ -2056,7 +2056,7 @@
+     }
+ 
+     private static MocksControl getControl(final Object mock) {
+-        return ClassExtensionHelper.getControl(mock);
++        return MocksControl.getControl(mock);
+     }
+ 
+     /**
+Index: easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassProxyFactoryTest.java
+===================================================================
+--- easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassProxyFactoryTest.java	(revision 269)
++++ easymock-classextension/src/test/java/org/easymock/classextension/tests2/ClassProxyFactoryTest.java	(revision )
+@@ -29,13 +29,13 @@
+  */
+ public class ClassProxyFactoryTest {
+ 
+-    private final ClassProxyFactory<ClassProxyFactoryTest> factory = new ClassProxyFactory<ClassProxyFactoryTest>();
++    private final ClassProxyFactory factory = new ClassProxyFactory();
+ 
+     @SuppressWarnings("unchecked")
+     @Test
+     public void testRegisterClassNotLeaking() throws Exception {
+         final ClassProxyFactoryTest mock = factory.createProxy(ClassProxyFactoryTest.class,
+-                NopInvocationHandler.NOP);
++                NopInvocationHandler.NOP, null, null);
+         // Go deep in the cglib implementation to make sure the callback was released on the mocked class
+         final Field field = mock.getClass().getDeclaredField("CGLIB$THREAD_CALLBACKS");
+         field.setAccessible(true);
+Index: easymock/src/main/java/org/easymock/internal/ClassProxyFactory.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/ClassProxyFactory.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/ClassProxyFactory.java	(revision )
+@@ -17,27 +17,34 @@
+ 
+ import java.io.IOException;
+ import java.io.Serializable;
+-import java.lang.reflect.*;
++import java.lang.reflect.Constructor;
+ import java.lang.reflect.InvocationHandler;
++import java.lang.reflect.InvocationTargetException;
++import java.lang.reflect.Method;
++import java.lang.reflect.Modifier;
+ import java.util.Arrays;
+ import java.util.HashSet;
+ import java.util.List;
+ import java.util.Set;
+-
+-import net.sf.cglib.core.*;
+-import net.sf.cglib.proxy.*;
+-
++import net.sf.cglib.core.CodeGenerationException;
++import net.sf.cglib.core.CollectionUtils;
++import net.sf.cglib.core.DefaultNamingPolicy;
++import net.sf.cglib.core.NamingPolicy;
++import net.sf.cglib.core.Predicate;
++import net.sf.cglib.core.VisibilityPredicate;
++import net.sf.cglib.proxy.Callback;
++import net.sf.cglib.proxy.Enhancer;
++import net.sf.cglib.proxy.Factory;
++import net.sf.cglib.proxy.MethodInterceptor;
++import net.sf.cglib.proxy.MethodProxy;
+ import org.easymock.ConstructorArgs;
+ 
+ /**
+  * Factory generating a mock for a class.
+  * 
+- * @param <T>
+- *            type of the proxy created
+- * 
+  * @author Henri Tremblay
+  */
+-public class ClassProxyFactory<T> implements IProxyFactory<T> {
++public class ClassProxyFactory implements IProxyFactory {
+ 
+     public static class MockMethodInterceptor implements MethodInterceptor, Serializable {
+ 
+@@ -62,18 +69,10 @@
+             // Here I need to check if the fillInStackTrace was called by EasyMock inner code
+             // If yes, invoke super. Otherwise, just behave normally
+             if (obj instanceof Throwable && method.getName().equals("fillInStackTrace")) {
+-                final Exception e = new Exception();
+-                final StackTraceElement[] elements = e.getStackTrace();
+-                // ///CLOVER:OFF
+-                if (elements.length > 2) {
+-                    // ///CLOVER:ON    
+-                    final StackTraceElement element = elements[2];
+-                    if (element.getClassName().equals("org.easymock.internal.MockInvocationHandler")
+-                            && element.getMethodName().equals("invoke")) {
++                if (isCallerMockInvocationHandlerInvoke(new Throwable())) {
+-                        return proxy.invokeSuper(obj, args);
+-                    }
+-                }
++                    return proxy.invokeSuper(obj, args);
++                }
++            }
+-            }
+ 
+             // Bridges should delegate to their bridged method. It should be done before
+             // checking for mocked methods because only unbridged method are mocked
+@@ -94,10 +93,6 @@
+             return handler.invoke(obj, method, args);
+         }
+ 
+-        public InvocationHandler getHandler() {
+-            return handler;
+-        }
+-
+         public void setMockedMethods(final Method... mockedMethods) {
+             this.mockedMethods = new HashSet<Method>(Arrays.asList(mockedMethods));
+         }
+@@ -153,12 +148,22 @@
+ 
+     // ///CLOVER:ON
+ 
+-    @SuppressWarnings("unchecked")
+-    public T createProxy(final Class<T> toMock, final InvocationHandler handler) {
++    public static boolean isCallerMockInvocationHandlerInvoke(Throwable e) throws Throwable {
++        final StackTraceElement[] elements = e.getStackTrace();
++        return elements.length > 2
++                && elements[2].getClassName().equals(MockInvocationHandler.class.getName())
++                && elements[2].getMethodName().equals("invoke");
++    }
+ 
++    @SuppressWarnings("unchecked")
++    public <T> T createProxy(final Class<T> toMock, final InvocationHandler handler,
++            final Method[] mockedMethods, final ConstructorArgs args) {
+         final Enhancer enhancer = createEnhancer(toMock);
+ 
+-        final MethodInterceptor interceptor = new MockMethodInterceptor(handler);
++        final MockMethodInterceptor interceptor = new MockMethodInterceptor(handler);
++        if (mockedMethods != null) {
++            interceptor.setMockedMethods(mockedMethods);
++        }
+         enhancer.setCallbackType(interceptor.getClass());
+ 
+         Class<?> mockClass;
+@@ -179,9 +184,8 @@
+         try {
+             Enhancer.registerCallbacks(mockClass, new Callback[] { interceptor });
+ 
+-            if (ClassExtensionHelper.getCurrentConstructorArgs() != null) {
++            if (args != null) {
+                 // Really instantiate the class
+-                final ConstructorArgs args = ClassExtensionHelper.getCurrentConstructorArgs();
+                 Constructor<?> cstr;
+                 try {
+                     // Get the constructor with the same params
+@@ -244,7 +248,7 @@
+         }
+     }
+ 
+-    private Enhancer createEnhancer(final Class<T> toMock) {
++    private Enhancer createEnhancer(final Class<?> toMock) {
+         // Create the mock
+         final Enhancer enhancer = new Enhancer() {
+ 
+@@ -269,4 +273,9 @@
+ 
+         return enhancer;
+     }
++
++    public InvocationHandler getInvocationHandler(Object mock) {
++        Factory factory = (Factory) mock;
++        return ((MockMethodInterceptor) factory.getCallback(0)).handler;
+-}
++    }
++}
+Index: easymock-classextension/src/test/java/org/easymock/classextension/tests/MockingTest.java
+===================================================================
+--- easymock-classextension/src/test/java/org/easymock/classextension/tests/MockingTest.java	(revision 269)
++++ easymock-classextension/src/test/java/org/easymock/classextension/tests/MockingTest.java	(revision )
+@@ -15,13 +15,12 @@
+  */
+ package org.easymock.classextension.tests;
+ 
+-import static org.easymock.EasyMock.*;
+ import static org.easymock.classextension.EasyMock.*;
++import org.easymock.internal.MocksControl;
+ import static org.junit.Assert.*;
+ 
+ import org.easymock.classextension.IMocksControl;
+ import org.easymock.classextension.internal.MocksClassControl;
+-import org.easymock.internal.ClassExtensionHelper;
+ import org.easymock.internal.MocksControl.MockType;
+ import org.junit.Test;
+ 
+@@ -55,8 +54,8 @@
+         ClassToMock transition2 = createMock(ClassToMock.class);
+ 
+         // Should have two different callbacks
+-        assertNotSame(ClassExtensionHelper.getInterceptor(transition2),
+-                ClassExtensionHelper.getInterceptor(transition1));
++        assertNotSame(MocksControl.getInvocationHandler(transition2),
++                MocksControl.getInvocationHandler(transition1));
+ 
+         transition2.foo();
+         transition1.foo();
+Index: easymock/src/main/java/org/easymock/internal/ClassExtensionHelper.java
+===================================================================
+--- easymock/src/main/java/org/easymock/internal/ClassExtensionHelper.java	(revision 269)
++++ easymock/src/main/java/org/easymock/internal/ClassExtensionHelper.java	(revision 269)
+@@ -1,88 +0,0 @@
+-/**
+- * Copyright 2001-2011 the original author or authors.
+- *
+- * Licensed under the Apache License, Version 2.0 (the "License");
+- * you may not use this file except in compliance with the License.
+- * You may obtain a copy of the License at
+- *
+- *     http://www.apache.org/licenses/LICENSE-2.0
+- *
+- * Unless required by applicable law or agreed to in writing, software
+- * distributed under the License is distributed on an "AS IS" BASIS,
+- * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+- * See the License for the specific language governing permissions and
+- * limitations under the License.
+- */
+-package org.easymock.internal;
+-
+-import java.lang.reflect.Proxy;
+-
+-import net.sf.cglib.proxy.Enhancer;
+-import net.sf.cglib.proxy.Factory;
+-
+-import org.easymock.ConstructorArgs;
+-import org.easymock.internal.ClassProxyFactory.MockMethodInterceptor;
+-
+-/**
+- * @author Henri Tremblay
+- */
+-public final class ClassExtensionHelper {
+-
+-    private static final ThreadLocal<ConstructorArgs> currentConstructorArgs = new ThreadLocal<ConstructorArgs>();
+-
+-    // ///CLOVER:OFF
+-    private ClassExtensionHelper() {
+-    }
+-
+-    // ///CLOVER:ON
+-
+-    public static void setCurrentConstructorArgs(final ConstructorArgs args) {
+-        currentConstructorArgs.set(args);
+-    }
+-
+-    public static ConstructorArgs getCurrentConstructorArgs() {
+-        return currentConstructorArgs.get();
+-    }
+-
+-    public static MockMethodInterceptor getInterceptor(final Object mock) {
+-        final Factory factory = (Factory) mock;
+-        return (MockMethodInterceptor) factory.getCallback(0);
+-    }
+-
+-    public static MocksControl getControl(final Object mock) {
+-        try {
+-            ObjectMethodsFilter handler;
+-
+-            if (Proxy.isProxyClass(mock.getClass())) {
+-                handler = (ObjectMethodsFilter) Proxy.getInvocationHandler(mock);
+-            } else if (Enhancer.isEnhanced(mock.getClass())) {
+-                handler = (ObjectMethodsFilter) getInterceptor(mock).getHandler();
+-            } else {
+-                throw new IllegalArgumentException("Not a mock: " + mock.getClass().getName());
+-            }
+-            return handler.getDelegate().getControl();
+-        } catch (final ClassCastException e) {
+-            throw new IllegalArgumentException("Not a mock: " + mock.getClass().getName());
+-        }
+-    }
+-
+-    /**
+-     * Return the class of interface (depending on the mock type) that was
+-     * mocked
+-     * 
+-     * @param <T>
+-     *            Mocked class
+-     * @param <V>
+-     *            Mock class
+-     * @param proxy
+-     *            Mock object
+-     * @return the mocked class or interface
+-     */
+-    @SuppressWarnings("unchecked")
+-    public static <T, V extends T> Class<T> getMockedType(final V proxy) {
+-        if (Proxy.isProxyClass(proxy.getClass())) {
+-            return (Class<T>) proxy.getClass().getInterfaces()[0];
+-        }
+-        return (Class<T>) proxy.getClass().getSuperclass();
+-    }
+-}

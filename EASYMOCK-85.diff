@@ -1,0 +1,173 @@
+Index: trunk/easymock/src/test/java/org/easymock/tests/RecordStateInvalidRangeTest.java
+===================================================================
+--- trunk/easymock/src/test/java/org/easymock/tests/RecordStateInvalidRangeTest.java	(revision 281)
++++ trunk/easymock/src/test/java/org/easymock/tests/RecordStateInvalidRangeTest.java	(working copy)
+@@ -40,8 +40,8 @@
+             expectLastCall().atLeastOnce().atLeastOnce();
+             fail();
+         } catch (final IllegalStateException expected) {
+-            assertEquals("last method called on mock already has a non-fixed count set.", expected
+-                    .getMessage());
++            assertEquals("last method called on mock already has a non-fixed count set.",
++                    expected.getMessage());
+         }
+     }
+ 
+@@ -52,8 +52,8 @@
+             expectLastCall().atLeastOnce().once();
+             fail();
+         } catch (final IllegalStateException expected) {
+-            assertEquals("last method called on mock already has a non-fixed count set.", expected
+-                    .getMessage());
++            assertEquals("last method called on mock already has a non-fixed count set.",
++                    expected.getMessage());
+         }
+     }
+ 
+@@ -72,12 +72,12 @@
+     @Test
+     public void setIllegalMaximumCount() {
+         mock.simpleMethod();
+-        final int NON_POSITIVE = 0;
++        final int NEGATIVE = -1;
+         try {
+-            expectLastCall().times(0, NON_POSITIVE);
++            expectLastCall().times(0, NEGATIVE);
+             fail();
+         } catch (final IllegalArgumentException expected) {
+-            assertEquals("maximum must be >= 1", expected.getMessage());
++            assertEquals("maximum must be >= 0", expected.getMessage());
+         }
+     }
+ 
+Index: trunk/easymock/src/test/java/org/easymock/tests/RecordStateMethodCallMissingTest.java
+===================================================================
+--- trunk/easymock/src/test/java/org/easymock/tests/RecordStateMethodCallMissingTest.java	(revision 281)
++++ trunk/easymock/src/test/java/org/easymock/tests/RecordStateMethodCallMissingTest.java	(working copy)
+@@ -150,6 +150,16 @@
+     }
+ 
+     @Test
++    public void setExactlyZeroWithoutMethodCall() {
++        try {
++            control.exactlyZero();
++            fail("IllegalStateException expected");
++        } catch (final IllegalStateException expected) {
++            assertMessage("times", expected);
++        }
++    }
++
++    @Test
+     public void setTimesWithoutMethodCall() {
+         try {
+             control.times(3);
+Index: trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java
+===================================================================
+--- trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java	(revision 281)
++++ trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java	(working copy)
+@@ -18,6 +18,7 @@
+ import static org.easymock.EasyMock.*;
+ import static org.junit.Assert.*;
+ 
++import org.easymock.EasyMock;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
+@@ -50,6 +51,18 @@
+     }
+ 
+     @Test
++    public void mockWithNoExpectedCallsOnMethodFailsAtFirstCall() {
++        try {
++            callMethodOnce();
++            EasyMock.expectLastCall().times(0);
++            replay(mock);
++            callMethodOnce();
++            fail("Expected AssertionError");
++        } catch (final AssertionError expected) {
++        }
++    }
++
++    @Test
+     public void mockWithOneExpectedCallFailsAtVerify() {
+         callMethodOnce();
+         replay(mock);
+Index: trunk/easymock/src/main/java/org/easymock/IExpectationSetters.java
+===================================================================
+--- trunk/easymock/src/main/java/org/easymock/IExpectationSetters.java	(revision 281)
++++ trunk/easymock/src/main/java/org/easymock/IExpectationSetters.java	(working copy)
+@@ -146,6 +146,13 @@
+     IExpectationSetters<T> atLeastOnce();
+ 
+     /**
++     * Expect the last invocation exactly zero times.
++     * 
++     * @return this object to allow method call chaining.
++     */
++    IExpectationSetters<T> exactlyZero();
++
++    /**
+      * Expect the last invocation any times.
+      * 
+      * @return this object to allow method call chaining.
+Index: trunk/easymock/src/main/java/org/easymock/internal/MocksControl.java
+===================================================================
+--- trunk/easymock/src/main/java/org/easymock/internal/MocksControl.java	(revision 281)
++++ trunk/easymock/src/main/java/org/easymock/internal/MocksControl.java	(working copy)
+@@ -322,6 +322,15 @@
+         }
+     }
+ 
++    public IExpectationSetters<Object> exactlyZero() {
++        try {
++            state.times(EXACTLY_ZERO);
++            return this;
++        } catch (final RuntimeExceptionWrapper e) {
++            throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
++        }
++    }
++
+     public IExpectationSetters<Object> anyTimes() {
+         try {
+             state.times(ZERO_OR_MORE);
+@@ -332,6 +341,11 @@
+     }
+ 
+     /**
++     * Exactly Zero calls.
++     */
++    public static final Range EXACTLY_ZERO = new Range(0);
++
++    /**
+      * Exactly one call.
+      */
+     public static final Range ONCE = new Range(1);
+Index: trunk/easymock/src/main/java/org/easymock/internal/Range.java
+===================================================================
+--- trunk/easymock/src/main/java/org/easymock/internal/Range.java	(revision 281)
++++ trunk/easymock/src/main/java/org/easymock/internal/Range.java	(working copy)
+@@ -33,17 +33,18 @@
+     }
+ 
+     public Range(final int minimum, final int maximum) {
+-        if (!(minimum <= maximum)) {
+-            throw new RuntimeExceptionWrapper(new IllegalArgumentException("minimum must be <= maximum"));
+-        }
+-
+         if (!(minimum >= 0)) {
+             throw new RuntimeExceptionWrapper(new IllegalArgumentException("minimum must be >= 0"));
+         }
+ 
+-        if (!(maximum >= 1)) {
+-            throw new RuntimeExceptionWrapper(new IllegalArgumentException("maximum must be >= 1"));
++        if (!(maximum >= 0)) {
++            throw new RuntimeExceptionWrapper(new IllegalArgumentException("maximum must be >= 0"));
+         }
++
++        if (!(minimum <= maximum)) {
++            throw new RuntimeExceptionWrapper(new IllegalArgumentException("minimum must be <= maximum"));
++        }
++
+         this.minimum = minimum;
+         this.maximum = maximum;
+     }

@@ -1,0 +1,60 @@
+Index: trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java
+===================================================================
+--- trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java	(revision 281)
++++ trunk/easymock/src/test/java/org/easymock/tests/UsageCallCountTest.java	(working copy)
+@@ -89,6 +102,40 @@
+     }
+ 
+     @Test
++    public void correctNumberOfCallsFromDifferentThreads() throws InterruptedException {
++        callMethodTwice();
++        replay(mock);
++
++        callMethodOnce();
++        final CallMethodOnceThread runnable = new CallMethodOnceThread();
++        runnable.run();
++
++        while (!runnable.threadComplete) {
++            Thread.sleep(2000);
++        }
++        verify(mock);
++    }
++
++    @Test
++    public void tooManyCallsFromDifferentThreads() throws InterruptedException {
++        callMethodTwice();
++        replay(mock);
++
++        final CallMethodOnceThread thread1 = new CallMethodOnceThread();
++        final Thread thread = new Thread();
++        thread.start();
++
++        final CallMethodOnceThread thread2 = new CallMethodOnceThread();
++        thread2.start();
++
++        while (!thread1.threadComplete && !thread2.threadComplete) {
++            Thread.sleep(1000);
++        }
++
++        assertMethodCallFails();
++    }
++
++    @Test
+     public void tooManyCalls() {
+         callMethodThreeTimes();
+         replay(mock);
+@@ -140,4 +187,14 @@
+         mock.method();
+         verify(mock);
+     }
++
++    class CallMethodOnceThread extends Thread {
++        boolean threadComplete = false;
++
++        @Override
++        public void run() {
++            callMethodOnce();
++            threadComplete = true;
++        }
++    };
+ }

@@ -1,0 +1,46 @@
+From 9eafb1a3b16ce25dc8d1c209f63bd3eedb77cb2e Mon Sep 17 00:00:00 2001
+From: Jerome Lacoste <jerome.lacoste@finn.no>
+Date: Sun, 4 Dec 2011 11:59:46 +0100
+Subject: [PATCH 3/3] Fix the concurrent issue in EasyMockProperties
+ initialization
+
+---
+ .../org/easymock/internal/EasyMockProperties.java  |   15 +++++++++++----
+ 1 files changed, 11 insertions(+), 4 deletions(-)
+
+diff --git a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+index 04fa07c..b145312 100644
+--- a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
++++ b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+@@ -18,6 +18,7 @@ package org.easymock.internal;
+ import java.io.BufferedInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.util.Enumeration;
+ import java.util.Map;
+ import java.util.Properties;
+ 
+@@ -79,10 +80,16 @@ public final class EasyMockProperties {
+     }
+ 
+     public static void overloadWithSystemProperties(final Properties properties) {
+-        for (final Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
+-            if (entry.getKey() instanceof String && entry.getKey().toString().startsWith(PREFIX)) {
+-                Thread.yield();
+-                properties.put(entry.getKey(), entry.getValue());
++        // we can't use keySet() because of potential concurrent access.
++        Properties sysProps = System.getProperties();
++        Enumeration<?> keyNames = sysProps.propertyNames();
++        while(keyNames.hasMoreElements()) {
++            String keyName = (String) keyNames.nextElement();
++            if(keyName.startsWith(PREFIX)) {
++                String value = sysProps.getProperty(keyName);
++                if (value != null) {  // value == null if property was removed while looping
++                    properties.put(keyName, value);
++                }
+             }
+         }
+     }
+-- 
+1.7.7
+

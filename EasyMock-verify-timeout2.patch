@@ -1,0 +1,668 @@
+Index: svn/easymock/src/test/java/org/easymock/tests/UsageStrictMockTest.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/test/java/org/easymock/tests/UsageStrictMockTest.java	(revision 288)
++++ svn/easymock/src/test/java/org/easymock/tests/UsageStrictMockTest.java	(revision )
+@@ -15,13 +15,15 @@
+  */
+ package org.easymock.tests;
+ 
+-import static org.easymock.EasyMock.*;
+-import static org.junit.Assert.*;
+-
+ import org.easymock.internal.ReplayState;
+ import org.junit.Before;
+ import org.junit.Test;
+ 
++import java.util.concurrent.TimeUnit;
++
++import static org.easymock.EasyMock.*;
++import static org.junit.Assert.*;
++
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -228,5 +230,92 @@
+             fail("exception expected");
+         }
+ 
++    }
++
++	@Test
++	public void verifyTimeoutWaitOnSingle() {
++		mock.simpleMethodWithArgument( "1" );
++
++		long beforeTime = System.currentTimeMillis();
++		// Call the second method in 500 ms
++		new Thread() {
++			@Override
++			public void run() {
++				try {
++					Thread.sleep(500);
++				}
++				catch (InterruptedException e) {
++					// skip
++				}
++				mock.simpleMethodWithArgument( "2" );
++			}
++		}.start();
++
++		verifyWait( 1, TimeUnit.SECONDS, mock );
++		long afterTime = System.currentTimeMillis();
++		long duration = afterTime - beforeTime;
++		assertTrue("Duration should be >= 500 ms: " + duration,
++			duration >= 500);
++		// NOTE: on really slow systems this could be a race condition, but 1 second
++		//       margin should hopefully be plenty
++		assertTrue("Duration should be < 2000 ms: " + duration,
++			duration < 2000);
++	}
++
++	@Test
++	public void verifyTimeoutWaitOnBoth() {
++		long beforeTime = System.currentTimeMillis();
++		// Call the second method in 500 ms
++		new Thread() {
++			@Override
++			public void run() {
++				try {
++					Thread.sleep(200);
++				} catch (InterruptedException e) {
++					// skip
++				}
++				mock.simpleMethodWithArgument( "1" );
++
++				try {
++					Thread.sleep(500);
++				} catch (InterruptedException e) {
++					// skip
++				}
++				mock.simpleMethodWithArgument( "2" );
++			}
++		}.start();
++
++		verifyWait( 2, TimeUnit.SECONDS, mock );
++		long afterTime = System.currentTimeMillis();
++		long duration = afterTime - beforeTime;
++		assertTrue("Duration should be >= 700 ms: " + duration,
++			duration >= 700);
++		// NOTE: on really slow systems this could be a race condition, but 1 second
++		//       margin should hopefully be plenty
++		assertTrue("Duration should be < 2200 ms: " + duration,
++			duration < 2200);
++	}
++
++	@Test
++	public void verifyTimeoutFailed() {
++		long beforeTime = System.currentTimeMillis();
++		mock.simpleMethodWithArgument("1");
++		boolean failed = false;
++		try {
++			verifyWait( 1, TimeUnit.SECONDS, mock );
++		} catch (final AssertionError expected) {
++			failed = true;
++			assertTrue("stack trace must be filled in", Util.getStackTrace(expected).indexOf(
++				ReplayState.class.getName()) == -1);
++
++			long duration = System.currentTimeMillis() - beforeTime;
++			assertTrue("Duration should be >= 1000 ms: " + duration,
++				duration >= 1000);
++			assertTrue("Duration should be < 1500 ms: " + duration,
++				duration < 1500);
++		}
++		if (!failed) {
++			fail("too few calls accepted");
++		}
+-    }
++	}
+ }
+Index: svn/easymock/src/main/java/org/easymock/internal/IMocksControlState.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/IMocksControlState.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/IMocksControlState.java	(revision )
+@@ -17,6 +17,9 @@
+ 
+ import org.easymock.IAnswer;
+ 
++import java.util.concurrent.TimeUnit;
++
++
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -54,5 +57,5 @@
+ 
+     void replay();
+ 
+-    void verify();
++    void verify(long timeout, TimeUnit unit);
+ }
+Index: svn/easymock/src/main/java/org/easymock/internal/RecordState.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/RecordState.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/RecordState.java	(revision )
+@@ -15,14 +15,15 @@
+  */
+ package org.easymock.internal;
+ 
++import org.easymock.IAnswer;
++import org.easymock.IArgumentMatcher;
++
+ import java.io.Serializable;
+ import java.util.HashMap;
+ import java.util.List;
+ import java.util.Map;
++import java.util.concurrent.TimeUnit;
+ 
+-import org.easymock.IAnswer;
+-import org.easymock.IArgumentMatcher;
+-
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -87,7 +88,7 @@
+         }
+     }
+ 
+-    public void verify() {
++    public void verify(long timeout, TimeUnit unit) {
+         throw new RuntimeExceptionWrapper(new IllegalStateException(
+                 "calling verify is not allowed in record state"));
+     }
+\ No newline at end of file
+Index: svn/easymock/src/main/java/org/easymock/internal/Results.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/Results.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/Results.java	(revision )
+@@ -19,7 +19,10 @@
+ import java.util.ArrayList;
+ import java.util.LinkedList;
+ import java.util.List;
++import java.util.concurrent.locks.Condition;
++import java.util.concurrent.locks.ReentrantLock;
+ 
++
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -31,17 +34,27 @@
+ 
+     private final LinkedList<Range> ranges = new LinkedList<Range>();
+ 
++	private final ReentrantLock modLock = new ReentrantLock();
++	private final Condition callOrRangesModified = modLock.newCondition();
++
+     private final List<Result> results = new ArrayList<Result>();
+ 
+     public void add(final Result result, final Range range) {
++	    modLock.lock();
++	    try {
+-        if (!ranges.isEmpty()) {
+-            final Range lastRange = ranges.getLast();
+-            if (!lastRange.hasFixedCount()) {
+-                throw new RuntimeExceptionWrapper(new IllegalStateException(
+-                        "last method called on mock already has a non-fixed count set."));
+-            }
+-        }
+-        ranges.add(range);
++	        if (!ranges.isEmpty()) {
++	            final Range lastRange = ranges.getLast();
++	            if (!lastRange.hasFixedCount()) {
++	                throw new RuntimeExceptionWrapper(new IllegalStateException(
++	                        "last method called on mock already has a non-fixed count set."));
++	            }
++	        }
++	        ranges.add(range);
++		    callOrRangesModified.signalAll();
++	    }
++	    finally {
++		    modLock.unlock();
++	    }
+         results.add(result);
+     }
+ 
+@@ -65,21 +78,63 @@
+         for (int i = 0; i < ranges.size(); i++) {
+             final Range interval = ranges.get(i);
+             if (interval.hasOpenCount()) {
++	            modLock.lock();
++	            try {
+-                callCount += 1;
++	                callCount += 1;
++		            callOrRangesModified.signalAll();
+-                return results.get(i);
++	                return results.get(i);
++	            } finally {
++		            modLock.unlock();
+-            }
++	            }
++            }
+             currentPosition += interval.getMaximum();
+             if (currentPosition > callCount) {
++	            modLock.lock();
++	            try {
+-                callCount += 1;
++		            callCount += 1;
++		            callOrRangesModified.signalAll();
+-                return results.get(i);
++		            return results.get(i);
++	            } finally {
++		            modLock.unlock();
+-            }
+-        }
++	            }
++            }
++        }
+         return null;
+     }
+ 
+     public boolean hasValidCallCount() {
+         return getMainInterval().contains(getCallCount());
++    }
++
++	/**
++	 * Similar to {@link #hasValidCallCount()}, but will wait up to {@code timeoutNanos}
++	 * to have the count.
++	 */
++	public boolean waitForValidCallCount(long timeoutNanos) throws InterruptedException {
++		long lastTime = System.nanoTime();
++		long remainingTimeNanos = timeoutNanos;
++
++		modLock.lock();
++		try {
++			boolean valid;
++			while(!( valid = hasValidCallCount())) {
++				if (remainingTimeNanos > 0) {
++					callOrRangesModified.awaitNanos( remainingTimeNanos );
++				}
++
++				// Decrement the time remaining
++				long time = System.nanoTime();
++				remainingTimeNanos -= (time - lastTime);
++				lastTime = time;
++
++				if (remainingTimeNanos < 0) break;
++			}
++			return valid;
++		}
++		finally {
++			modLock.unlock();
++		}
+-    }
++	}
+ 
+     @Override
+     public String toString() {
+Index: svn/easymock/src/main/java/org/easymock/internal/MocksBehavior.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/MocksBehavior.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/MocksBehavior.java	(revision )
+@@ -15,12 +15,13 @@
+  */
+ package org.easymock.internal;
+ 
++import org.easymock.EasyMock;
++
+ import java.io.Serializable;
+ import java.util.ArrayList;
+ import java.util.List;
++import java.util.concurrent.TimeUnit;
+ 
+-import org.easymock.EasyMock;
+-
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -148,15 +149,33 @@
+         throw new AssertionErrorWrapper(new AssertionError(errorMessage));
+     }
+ 
+-    public void verify() {
++    public void verify(long timeout, TimeUnit unit) {
+         boolean verified = true;
+ 
++	    long lastTime = System.nanoTime();
++	    long remainingTimeNanos = unit.toNanos(timeout);
++	    boolean wasInterrupted = false;
+         for (final UnorderedBehavior behaviorList : behaviorLists.subList(position, behaviorLists.size())) {
+-            if (!behaviorList.verify()) {
++	        try {
++		        // NOTE: make sure the remaining timeout is never less than zero
++	            if (!behaviorList.verify(Math.max(0,remainingTimeNanos))) {
+-                verified = false;
+-                break;
+-            }
++	                verified = false;
++	                break;
++	            }
++	        } catch(InterruptedException ex) {
++		        wasInterrupted = true;
++		        verified = false;
++		        break;
+-        }
++	        }
++
++	        // Decrement the time remaining
++	        long time = System.nanoTime();
++	        remainingTimeNanos -= ( time - lastTime );
++	        lastTime = time;
++
++	        // NOTE: if the timeout has passed, don't break here (still need to check
++	        //       other behaviors). Instead, we just won't block at all.
++        }
+         if (verified) {
+             return;
+         }
+@@ -164,6 +183,9 @@
+         final StringBuilder errorMessage = new StringBuilder(70 * (behaviorLists.size() - position + 1));
+ 
+         errorMessage.append("\n  Expectation failure on verify:");
++	    if (wasInterrupted) {
++		    errorMessage.append("(Interrupted while waiting for verify)");
++	    }
+         for (final UnorderedBehavior behaviorList : behaviorLists.subList(position, behaviorLists.size())) {
+             for (final ErrorMessage m : behaviorList.getMessages(null)) {
+                 m.appendTo(errorMessage, 0);
+Index: svn/easymock/src/main/java/org/easymock/internal/ReplayState.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/ReplayState.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/ReplayState.java	(revision )
+@@ -15,11 +15,12 @@
+  */
+ package org.easymock.internal;
+ 
++import org.easymock.IAnswer;
++
+ import java.io.Serializable;
++import java.util.concurrent.TimeUnit;
+ import java.util.concurrent.locks.ReentrantLock;
+ 
+-import org.easymock.IAnswer;
+-
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -69,8 +70,8 @@
+         }
+     }
+ 
+-    public void verify() {
+-        behavior.verify();
++    public void verify(long timeout, TimeUnit unit) {
++        behavior.verify(timeout, unit);
+     }
+ 
+     public void replay() {
+Index: svn/easymock/src/main/java/org/easymock/internal/IMocksBehavior.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/IMocksBehavior.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/IMocksBehavior.java	(revision )
+@@ -15,6 +15,9 @@
+  */
+ package org.easymock.internal;
+ 
++import java.util.concurrent.TimeUnit;
++
++
+ /**
+  * @author OFFIS, Tammo Freese
+  */
+@@ -39,5 +42,5 @@
+     void checkThreadSafety();
+ 
+     // verify
+-    void verify();
++    void verify(long timeout, TimeUnit unit);
+ }
+Index: svn/easymock/src/main/java/org/easymock/internal/MocksControl.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/MocksControl.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/MocksControl.java	(revision )
+@@ -15,12 +15,14 @@
+  */
+ package org.easymock.internal;
+ 
+-import static org.easymock.internal.ClassExtensionHelper.*;
++import org.easymock.*;
+ 
+ import java.io.Serializable;
+ import java.lang.reflect.Method;
++import java.util.concurrent.TimeUnit;
+ 
+-import org.easymock.*;
++import static org.easymock.internal.ClassExtensionHelper.getInterceptor;
++import static org.easymock.internal.ClassExtensionHelper.setCurrentConstructorArgs;
+ 
+ /**
+  * @author OFFIS, Tammo Freese
+@@ -174,9 +176,19 @@
+         }
+     }
+ 
+-    public void verify() {
+-        try {
++	public void verify() {
++		try {
+-            state.verify();
++			state.verify(0,TimeUnit.NANOSECONDS);
++		} catch (final RuntimeExceptionWrapper e) {
++			throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
++		} catch (final AssertionErrorWrapper e) {
++			throw (AssertionError) e.getAssertionError().fillInStackTrace();
++		}
++	}
++
++    public void verify( long timeout, TimeUnit unit ) {
++        try {
++            state.verify(timeout, unit);
+         } catch (final RuntimeExceptionWrapper e) {
+             throw (RuntimeException) e.getRuntimeException().fillInStackTrace();
+         } catch (final AssertionErrorWrapper e) {
+Index: svn/easymock/src/main/java/org/easymock/EasyMock.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/EasyMock.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/EasyMock.java	(revision )
+@@ -15,12 +15,13 @@
+  */
+ package org.easymock;
+ 
+-import java.lang.reflect.Method;
+-import java.util.Comparator;
+-
+ import org.easymock.internal.*;
+ import org.easymock.internal.matchers.*;
+ 
++import java.lang.reflect.Method;
++import java.util.Comparator;
++import java.util.concurrent.TimeUnit;
++
+ /**
+  * Main EasyMock class. Contains methods to create, replay and verify mocks and
+  * a list of standard matchers.
+@@ -1063,7 +1064,7 @@
+      * @return <code>false</code>.
+      */
+     public static boolean and(final boolean first, final boolean second) {
+-        LastControl.reportAnd(2);
++        LastControl.reportAnd( 2 );
+         return false;
+     }
+ 
+@@ -1191,7 +1192,7 @@
+      * @return <code>false</code>.
+      */
+     public static boolean or(final boolean first, final boolean second) {
+-        LastControl.reportOr(2);
++        LastControl.reportOr( 2 );
+         return false;
+     }
+ 
+@@ -1427,7 +1428,7 @@
+      * @return <code>0</code>.
+      */
+     public static boolean eq(final boolean value) {
+-        reportMatcher(new Equals(value));
++        reportMatcher( new Equals( value ) );
+         return false;
+     }
+ 
+@@ -2030,16 +2031,37 @@
+ 
+     /**
+      * Verifies the given mock objects (more exactly: the controls of the mock
+-     * objects).
++     * objects) without any delay if verification fails.
+      * 
+      * @param mocks
+      *            the mock objects.
++     *
++     * @see #verify
+      */
+     public static void verify(final Object... mocks) {
++	    verifyWait( 0, TimeUnit.MILLISECONDS, mocks );
++    }
++
++	/**
++	 * Verifies the given mock objects (more exactly: the controls of the mock
++	 * objects), possibly waiting if verification does not immediately succeed.
++	 * If the thread is interrupted while waiting for verification, the result is
++	 * considered a failure.
++	 *
++	 * @param timeout
++	 *            the time to wait for verification to succeed. A value of zero will cause
++	 *            no blocking. The value must be >=0.
++	 * @param unit
++	 *            the {@link TimeUnit} that applies to {@code timeout}.
++	 * @param mocks
++	 *            the mock objects.
++	 */
++	public static void verifyWait( final long timeout, final TimeUnit unit,
++		final Object... mocks ) {
+-        for (final Object mock : mocks) {
++		for (final Object mock : mocks) {
+-            getControl(mock).verify();
++			getControl(mock).verify( timeout, unit );
+-        }
+-    }
++		}
++	}
+ 
+     /**
+      * Switches order checking of the given mock object (more exactly: the
+Index: svn/easymock/src/main/java/org/easymock/internal/UnorderedBehavior.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/internal/UnorderedBehavior.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/internal/UnorderedBehavior.java	(revision )
+@@ -70,15 +70,31 @@
+         return null;
+     }
+ 
+-    public boolean verify() {
+-        for (final ExpectedInvocationAndResults entry : results) {
+-            if (!entry.getResults().hasValidCallCount()) {
+-                return false;
+-            }
+-        }
+-        return true;
+-    }
++	public boolean verify() {
++		for (final ExpectedInvocationAndResults entry : results) {
++			if (!entry.getResults().hasValidCallCount()) {
++				return false;
++			}
++		}
++		return true;
++	}
+ 
++    public boolean verify(long timeoutNanos) throws InterruptedException {
++	    long lastTime = System.nanoTime();
++	    long remainingTimeNanos = timeoutNanos;
++        for (final ExpectedInvocationAndResults entry : results) {
++	        if (!entry.getResults().waitForValidCallCount(remainingTimeNanos)) {
++                return false;
++            }
++
++	        // Decrement the time remaining
++	        long time = System.nanoTime();
++	        remainingTimeNanos -= (time - lastTime);
++	        lastTime = time;
++        }
++        return true;
++    }
++
+     public List<ErrorMessage> getMessages(final Invocation invocation) {
+         final List<ErrorMessage> messages = new ArrayList<ErrorMessage>(results.size());
+         for (final ExpectedInvocationAndResults entry : results) {
+\ No newline at end of file
+Index: svn/easymock/src/main/java/org/easymock/IMocksControl.java
+IDEA additional info:
+Subsystem: com.intellij.openapi.diff.impl.patch.CharsetEP
+<+>UTF-8
+===================================================================
+--- svn/easymock/src/main/java/org/easymock/IMocksControl.java	(revision 288)
++++ svn/easymock/src/main/java/org/easymock/IMocksControl.java	(revision )
+@@ -16,7 +16,9 @@
+ package org.easymock;
+ 
+ import java.lang.reflect.Method;
++import java.util.concurrent.TimeUnit;
+ 
++
+ /**
+  * Controls all the mock objects created by it. For details, see the EasyMock
+  * documentation.
+@@ -160,9 +162,24 @@
+     void replay();
+ 
+     /**
+-     * Verifies that all expectations were met.
++     * Verifies that all expectations were met without any delay if verification fails.
++     *
++     * @see #verify
+      */
+     void verify();
++
++	/**
++	 * Verifies that all expectations were met, possibly waiting if verification
++	 * does not immediately succeed. If the thread is interrupted while waiting for
++	 * verification, the result is considered a failure.
++	 *
++	 * @param timeout
++	 *            the time to wait for verification to succeed. A value of zero will cause
++	 *            no blocking. The value must be >=0.
++	 * @param unit
++	 *            the {@link TimeUnit} that applies to {@code timeout}.
++	 */
++	void verify( long timeout, TimeUnit unit );
+ 
+     /**
+      * Switches order checking on and off.

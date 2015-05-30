@@ -1,0 +1,105 @@
+diff --git a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+index ea4c7e5..b145312 100644
+--- a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
++++ b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+@@ -18,6 +18,7 @@ package org.easymock.internal;
+ import java.io.BufferedInputStream;
+ import java.io.IOException;
+ import java.io.InputStream;
++import java.util.Enumeration;
+ import java.util.Map;
+ import java.util.Properties;
+ 
+@@ -27,7 +28,7 @@ import java.util.Properties;
+  * previous step):
+  * <ul>
+  * <li>easymock.properties in classpath default package</li>
+- * <li>System properties</li>
++ * <li>System properties (at instatiation time)</li>
+  * <li>explicit call to setProperty</li>
+  * </ul>
+  * 
+@@ -56,14 +57,18 @@ public final class EasyMockProperties {
+     }
+ 
+     private EasyMockProperties() {
+-        // Load the easymock.properties file
+-        InputStream in = getClassLoader().getResourceAsStream("easymock.properties");
++        loadEasyMockProperties("easymock.properties");
++        overloadWithSystemProperties(properties);
++    }
++
++    private void loadEasyMockProperties(final String propertyFileName) {
++        InputStream in = getClassLoader().getResourceAsStream(propertyFileName);
+         if (in != null) {
+             in = new BufferedInputStream(in);
+             try {
+                 properties.load(in);
+             } catch (final IOException e) {
+-                throw new RuntimeException("Failed to read easymock.properties file");
++                throw new RuntimeException("Failed to read " + propertyFileName + " file");
+             } finally {
+                 try {
+                     in.close();
+@@ -72,10 +77,19 @@ public final class EasyMockProperties {
+                 }
+             }
+         }
+-        // Then overload it with system properties
+-        for (final Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
+-            if (entry.getKey() instanceof String && entry.getKey().toString().startsWith(PREFIX)) {
+-                properties.put(entry.getKey(), entry.getValue());
++    }
++
++    public static void overloadWithSystemProperties(final Properties properties) {
++        // we can't use keySet() because of potential concurrent access.
++        Properties sysProps = System.getProperties();
++        Enumeration<?> keyNames = sysProps.propertyNames();
++        while(keyNames.hasMoreElements()) {
++            String keyName = (String) keyNames.nextElement();
++            if(keyName.startsWith(PREFIX)) {
++                String value = sysProps.getProperty(keyName);
++                if (value != null) {  // value == null if property was removed while looping
++                    properties.put(keyName, value);
++                }
+             }
+         }
+     }
+diff --git a/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java b/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
+index e2f1db0..7c286ee 100644
+--- a/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
++++ b/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
+@@ -21,6 +21,7 @@ import static org.junit.Assert.*;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.lang.reflect.Field;
++import java.util.Properties;
+ 
+ import org.easymock.internal.EasyMockProperties;
+ import org.junit.BeforeClass;
+@@ -91,6 +92,25 @@ public class EasyMockPropertiesTest {
+     }
+ 
+     @Test
++    public void overloadSystemPropertiesIsThreadSafe() throws InterruptedException {
++        Runnable systemPropertiesModifier = new Runnable() {
++            public void run() {
++                for (int i = 0; i < 1000; i++)
++                    System.setProperty("easymock.test." + i, "" + i);
++            }
++        };
++
++        Thread t1 = new Thread(systemPropertiesModifier);
++        t1.start();
++        final Properties p = new Properties();
++        for (int i = 0; i < 1000; i++) {
++           EasyMockProperties.overloadWithSystemProperties(p);
++        }
++
++        t1.join();
++    }
++
++    @Test
+     public void testNoThreadContextClassLoader() throws Exception {
+         final ClassLoader old = Thread.currentThread().getContextClassLoader();
+         try {

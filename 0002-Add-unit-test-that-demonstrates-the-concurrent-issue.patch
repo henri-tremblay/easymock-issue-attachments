@@ -1,0 +1,65 @@
+From 465f5cbdb68404e152eca4fd70b0946b5bd323bc Mon Sep 17 00:00:00 2001
+From: Jerome Lacoste <jerome.lacoste@finn.no>
+Date: Sun, 4 Dec 2011 11:58:04 +0100
+Subject: [PATCH 2/3] Add unit test that demonstrates the concurrent issue in
+ EasyMockProperties initialization
+
+---
+ .../org/easymock/internal/EasyMockProperties.java  |    2 +-
+ .../easymock/tests2/EasyMockPropertiesTest.java    |   20 ++++++++++++++++++++
+ 2 files changed, 21 insertions(+), 1 deletions(-)
+
+diff --git a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+index ca202b4..04fa07c 100644
+--- a/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
++++ b/easymock/src/main/java/org/easymock/internal/EasyMockProperties.java
+@@ -78,7 +78,7 @@ public final class EasyMockProperties {
+         }
+     }
+ 
+-    private static void overloadWithSystemProperties(final Properties properties) {
++    public static void overloadWithSystemProperties(final Properties properties) {
+         for (final Map.Entry<Object, Object> entry : System.getProperties().entrySet()) {
+             if (entry.getKey() instanceof String && entry.getKey().toString().startsWith(PREFIX)) {
+                 Thread.yield();
+diff --git a/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java b/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
+index e2f1db0..7c286ee 100644
+--- a/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
++++ b/easymock/src/test/java/org/easymock/tests2/EasyMockPropertiesTest.java
+@@ -21,6 +21,7 @@ import static org.junit.Assert.*;
+ import java.io.IOException;
+ import java.io.InputStream;
+ import java.lang.reflect.Field;
++import java.util.Properties;
+ 
+ import org.easymock.internal.EasyMockProperties;
+ import org.junit.BeforeClass;
+@@ -91,6 +92,25 @@ public class EasyMockPropertiesTest {
+     }
+ 
+     @Test
++    public void overloadSystemPropertiesIsThreadSafe() throws InterruptedException {
++        Runnable systemPropertiesModifier = new Runnable() {
++            public void run() {
++                for (int i = 0; i < 1000; i++)
++                    System.setProperty("easymock.test." + i, "" + i);
++            }
++        };
++
++        Thread t1 = new Thread(systemPropertiesModifier);
++        t1.start();
++        final Properties p = new Properties();
++        for (int i = 0; i < 1000; i++) {
++           EasyMockProperties.overloadWithSystemProperties(p);
++        }
++
++        t1.join();
++    }
++
++    @Test
+     public void testNoThreadContextClassLoader() throws Exception {
+         final ClassLoader old = Thread.currentThread().getContextClassLoader();
+         try {
+-- 
+1.7.7
+

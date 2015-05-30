@@ -1,0 +1,52 @@
+Index: src/main/java/org/easymock/internal/ExpectedInvocation.java
+===================================================================
+--- src/main/java/org/easymock/internal/ExpectedInvocation.java	(revision 301)
++++ src/main/java/org/easymock/internal/ExpectedInvocation.java	(working copy)
+@@ -16,6 +16,7 @@
+ package org.easymock.internal;
+ 
+ import java.io.Serializable;
++import java.lang.reflect.Array;
+ import java.lang.reflect.Method;
+ import java.util.ArrayList;
+ import java.util.Iterator;
+@@ -87,6 +88,10 @@
+     }
+ 
+     private boolean matches(final Object[] arguments) {
++        if (this.invocation.getMethod().isVarArgs()) {
++            return matchVarargs(arguments);
++        }
++
+         if (arguments.length != matchers.size()) {
+             return false;
+         }
+@@ -98,6 +103,28 @@
+         return true;
+     }
+ 
++    private boolean matchVarargs(final Object[] arguments) {
++        for (int i = 0; i < matchers.size() - 1; i++) {
++            if (!matchers.get(i).matches(arguments[i])) {
++                return false;
++            }
++        }
++        final Class<?>[] paramTypes = this.invocation.getMethod().getParameterTypes();
++        final int varargLength = arguments.length - matchers.size() + 1;
++
++        if (varargLength == 1)
++            return matchers.get(matchers.size() - 1).matches(arguments[arguments.length - 1]);
++
++        final Object varargArray = Array.newInstance(
++                paramTypes[paramTypes.length - 1].getComponentType(), varargLength);
++
++        for (int i = 0; i < varargLength; i++) {
++            Array.set(varargArray, i, arguments[paramTypes.length - 1 + i]);
++        }
++
++        return matchers.get(matchers.size() - 1).matches(varargArray);
++    }
++
+     @Override
+     public String toString() {
+         final StringBuffer result = new StringBuffer();
